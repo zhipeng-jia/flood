@@ -53,6 +53,14 @@ struct Opt {
     #[structopt(long = "arrival-process", default_value = "poisson")]
     arrival_process: String,
 
+    /// Number of JS threads
+    #[structopt(short = "t", long = "js-threads", default_value = "2")]
+    num_js_threads: i32,
+
+    /// Queue size for request generation
+    #[structopt(long = "request-qsize", default_value = "128")]
+    request_qsize: i32,
+
     /// JavaScript file
     #[structopt(name = "SCRIPT")]
     js_script_path: String,
@@ -178,7 +186,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let script_content =
         fs::read_to_string(&opt.js_script_path).expect("Failed to read script file");
 
-    let mut generator = Generator::new(&opt.host);
+    let mut generator = Generator::new(
+        &opt.host,
+        opt.num_js_threads as usize,
+        opt.request_qsize as usize,
+    );
     generator.load_user_script(&script_content)?;
     let mut client = Client::new(&addr, generator);
 
