@@ -178,7 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let script_content =
         fs::read_to_string(&opt.js_script_path).expect("Failed to read script file");
 
-    let generator = Generator::new(&opt.host, &script_content);
+    let mut generator = Generator::new(&opt.host);
+    generator.load_user_script(&script_content)?;
     let mut client = Client::new(&addr, generator);
 
     client.set_connect_timeout(humantime::parse_duration(&opt.connect_timeout)?);

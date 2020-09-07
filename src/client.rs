@@ -306,7 +306,7 @@ impl Client {
 
         let mut events = Events::with_capacity(1024);
 
-        loop {
+        while Instant::now() <= finish_time {
             match self
                 .ev_loop
                 .poll(&mut events, Some(Duration::from_millis(100)))
@@ -387,9 +387,6 @@ impl Client {
                 } else {
                     panic!("Unknown token");
                 }
-            }
-            if Instant::now() >= finish_time {
-                break;
             }
         }
 
