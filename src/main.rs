@@ -21,9 +21,9 @@ struct Opt {
     #[structopt(short = "h", long = "host", default_value = "127.0.0.1:8080")]
     host: String,
 
-    /// Host address
-    #[structopt(long = "warmup-duration", default_value = "10s")]
-    warmup_duration: String,
+    /// Fraction of warm-up duration w.r.t. full duration
+    #[structopt(long = "warmup-fraction", default_value = "0.2")]
+    warmup_fraction: f32,
 
     /// Running duration
     #[structopt(short = "d", long = "duration", default_value = "30s")]
@@ -181,8 +181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::from_args();
 
     let addr: SocketAddr = opt.host.parse()?;
-    let warmup_duration = humantime::parse_duration(&opt.warmup_duration)?;
     let duration = humantime::parse_duration(&opt.duration)?;
+    let warmup_duration = Duration::from_secs_f32(duration.as_secs_f32() * opt.warmup_fraction);
     let script_content =
         fs::read_to_string(&opt.js_script_path).expect("Failed to read script file");
 

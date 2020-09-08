@@ -29,15 +29,62 @@ impl fmt::Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+struct RequestQueue {
+    capacity: usize,
+    queue: Mutex<VecDeque<Bytes>>,
+    cond: Condvar,
+    waiter: atomic::AtomicUsize,
+    stopped: atomic::AtomicBool,
+}
+
+impl RequestQueue {
+    pub fn new(capacity: usize) -> RequestQueue {
+        Self {
+            capacity: capacity,
+            queue: Mutex::new(VecDeque::<Bytes>::with_capacity(capacity)),
+            cond: Condvar::new(),
+            waiter: atomic::AtomicUsize::new(0),
+            stopped: atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn push(&self, data: Bytes) {
+        let mut queue = self.queue.lock().unwrap();
+        while (*queue).len() >= self.capacity {
+            self.waiter.fetch_add(1, atomic::Ordering::SeqCst);
+            queue = self.cond.wait(queue).unwrap();
+            self.waiter.fetch_sub(1, atomic::Ordering::SeqCst);
+            if self.stopped.load(atomic::Ordering::SeqCst) {
+                return;
+            }
+        }
+        assert!((*queue).len() < self.capacity);
+        (*queue).push_back(data);
+    }
+
+    pub fn pop(&self) -> Option<Bytes> {
+        let mut queue = self.queue.lock().unwrap();
+        if let Some(data) = (*queue).pop_front() {
+            if self.waiter.load(atomic::Ordering::SeqCst) > 0 {
+                self.cond.notify_one();
+            }
+            return Some(data);
+        }
+        None
+    }
+
+    pub fn stop_all_waiters(&self) {
+        self.stopped.store(true, atomic::Ordering::SeqCst);
+        self.cond.notify_all();
+    }
+}
+
 pub struct Generator {
     host: String,
     num_threads: usize,
-    max_qsize: usize,
     thread_control: Arc<atomic::AtomicBool>,
     threads: Vec<thread::JoinHandle<()>>,
-    queue_mu: Arc<Mutex<VecDeque<Bytes>>>,
-    queue_cond: Arc<Condvar>,
-    active_thread: Arc<atomic::AtomicUsize>,
+    queue: Arc<RequestQueue>,
     js_context: quick_js::Context,
 }
 
@@ -66,6 +113,7 @@ macro_rules! expect_js_obj {
 impl Drop for Generator {
     fn drop(&mut self) {
         self.thread_control.store(false, atomic::Ordering::SeqCst);
+        self.queue.stop_all_waiters();
         while let Some(thread) = self.threads.pop() {
             thread.join().unwrap();
         }
@@ -79,12 +127,9 @@ impl Generator {
         Self {
             host: String::from(host),
             num_threads: num_threads,
-            max_qsize: max_qsize,
             thread_control: Arc::new(atomic::AtomicBool::new(false)),
             threads: Vec::<thread::JoinHandle<()>>::with_capacity(num_threads),
-            queue_mu: Arc::new(Mutex::new(VecDeque::<Bytes>::with_capacity(max_qsize))),
-            queue_cond: Arc::new(Condvar::new()),
-            active_thread: Arc::new(atomic::AtomicUsize::new(0)),
+            queue: Arc::new(RequestQueue::new(max_qsize)),
             js_context: js_context,
         }
     }
@@ -104,28 +149,17 @@ impl Generator {
         self.thread_control.store(true, atomic::Ordering::SeqCst);
         for i in 0..self.num_threads {
             let control = self.thread_control.clone();
-            let queue_mu = self.queue_mu.clone();
-            let queue_cond = self.queue_cond.clone();
-            let max_qsize = self.max_qsize;
-            let active_thread = self.active_thread.clone();
+            let queue = self.queue.clone();
             let user_script = String::from(user_script);
             let host = self.host.clone();
             let thread = thread::spawn(move || {
-                active_thread.fetch_add(1, atomic::Ordering::SeqCst);
                 info!("{}-th JS thread starts", i);
                 let js_context = quick_js::Context::new().unwrap();
                 js_context.eval(JS_LIB_CODE).unwrap();
                 js_context.eval(&user_script).unwrap();
                 while control.load(atomic::Ordering::SeqCst) {
                     let data = Generator::new_request(&host, &js_context).unwrap();
-                    let mut queue = queue_mu.lock().unwrap();
-                    while (*queue).len() >= max_qsize {
-                        active_thread.fetch_sub(1, atomic::Ordering::SeqCst);
-                        queue = queue_cond.wait(queue).unwrap();
-                        active_thread.fetch_add(1, atomic::Ordering::SeqCst);
-                    }
-                    assert!((*queue).len() < max_qsize);
-                    (*queue).push_back(data);
+                    queue.push(data);
                 }
             });
             self.threads.push(thread);
@@ -141,7 +175,7 @@ impl Generator {
                 return Err(Error::JsExecError(js_err));
             }
         };
-        for key in ["method", "path", "headers", "body"].iter() {
+        for key in ["method", "path", "headers"].iter() {
             if !request.contains_key(*key) {
                 return Err(Error::InvalidScript(format!(
                     "Returned object must contain `{}`",
@@ -194,26 +228,20 @@ impl Generator {
             write!(&mut data, "Content-Type: text/plain\r\n").unwrap();
         }
 
-        let body = expect_js_str!(request.get("body").unwrap(), "`body` must be a string");
-        write!(&mut data, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
-        data.put_slice(body.as_bytes());
+        if request.contains_key("body") {
+            let body = expect_js_str!(request.get("body").unwrap(), "`body` must be a string");
+            write!(&mut data, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+            data.put_slice(body.as_bytes());
+        } else {
+            write!(&mut data, "\r\n").unwrap();
+        }
 
         Ok(data.freeze())
     }
 
     pub fn get(&mut self) -> Bytes {
-        {
-            let mut queue = self.queue_mu.lock().unwrap();
-            if let Some(data) = (*queue).pop_front() {
-                if (*queue).len() < self.max_qsize / 2
-                    || self.active_thread.load(atomic::Ordering::SeqCst) == 0
-                {
-                    self.queue_cond.notify_one();
-                }
-                return data;
-            } else {
-                self.queue_cond.notify_all();
-            }
+        if let Some(data) = self.queue.pop() {
+            return data;
         }
         warn!("JS threads failed to generate enough request data");
         Generator::new_request(&self.host, &self.js_context).unwrap()
