@@ -7,7 +7,7 @@ use exec_info::ExecutionInfo;
 use generator::Generator;
 
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use env_logger;
@@ -180,7 +180,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let opt = Opt::from_args();
 
-    let addr: SocketAddr = opt.host.parse()?;
+    let mut resolved_addrs = opt.host.to_socket_addrs()?;
+    let addr: SocketAddr = resolved_addrs.next().unwrap();
     let duration = humantime::parse_duration(&opt.duration)?;
     let warmup_duration = Duration::from_secs_f32(duration.as_secs_f32() * opt.warmup_fraction);
     let script_content =

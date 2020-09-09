@@ -9,9 +9,10 @@ pub struct ExecutionInfo {
     pub bytes_sent: usize,
     pub bytes_recv: usize,
     pub request_total: u32,
-    pub success_count: u32, // 200
-    pub failure_count: u32, // non-200
-    pub error_count: u32,   // other errors
+    pub success_count: u32,    // 200
+    pub failure_count: u32,    // non-200
+    pub conn_error_count: u32, // other errors
+    pub parse_error_count: u32,
 }
 
 impl ExecutionInfo {
@@ -24,7 +25,8 @@ impl ExecutionInfo {
             request_total: 0,
             success_count: 0,
             failure_count: 0,
-            error_count: 0,
+            conn_error_count: 0,
+            parse_error_count: 0,
         }
     }
 
@@ -62,7 +64,13 @@ impl ExecutionInfo {
 
     pub fn connection_error(&mut self) {
         if Instant::now() >= self.initial_time {
-            self.error_count += 1;
+            self.conn_error_count += 1;
+        }
+    }
+
+    pub fn parse_error(&mut self) {
+        if Instant::now() >= self.initial_time {
+            self.parse_error_count += 1;
         }
     }
 }

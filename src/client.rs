@@ -188,6 +188,7 @@ impl Connection {
                 }
             }
             Err(err) => {
+                exec_info.parse_error();
                 return Err(std::io::Error::new(
                     ErrorKind::Other,
                     format!("HTTP parsing failed: {}", err),
@@ -259,7 +260,18 @@ impl Client {
         )?;
         connection.register(self.ev_loop.registry(), Interest::WRITABLE)?;
         self.connections.insert(token, connection);
+        info!(
+            "Create new connection, total number is {}",
+            self.connections.len()
+        );
         Ok(())
+    }
+
+    fn connection_failed(&mut self, token: Token) -> std::io::Result<()> {
+        let connection = self.connections.get_mut(&token).unwrap();
+        connection.deregister(self.ev_loop.registry())?;
+        self.connections.remove(&token);
+        self.create_connection()
     }
 
     pub fn run(
@@ -327,12 +339,25 @@ impl Client {
             for event in &events {
                 let token = event.token();
                 if token == timer_token {
-                    if !self.idle_connections.is_empty() {
-                        let conn_token = &self.idle_connections.pop_front().unwrap();
-                        let connection = self.connections.get_mut(&conn_token).unwrap();
-                        if connection.do_request(&mut self.generator, &mut exec_info)? {
-                            connection.state_transition(Some(self.ev_loop.registry()))?;
+                    let mut request_done = false;
+                    while let Some(conn_token) = self.idle_connections.pop_front() {
+                        if let Some(connection) = self.connections.get_mut(&conn_token) {
+                            assert!(connection.state() == ConnectionState::Idle);
+                            match connection.do_request(&mut self.generator, &mut exec_info) {
+                                Ok(_) => {
+                                    connection.state_transition(Some(self.ev_loop.registry()))?;
+                                }
+                                Err(err) => {
+                                    error!("Connection with {:?} failed: {}", conn_token, err);
+                                    self.connection_failed(conn_token)?;
+                                }
+                            }
+                            request_done = true;
+                            break;
                         }
+                    }
+                    if !request_done {
+                        error!("Cannot find an idle connection.");
                     }
                     tfd.read();
                     match self.arrival_process {
@@ -348,21 +373,26 @@ impl Client {
                     let connection = self.connections.get_mut(&token).unwrap();
                     if event.is_error() || event.is_read_closed() || event.is_write_closed() {
                         if event.is_error() {
-                            error!("Connection with token {:?} has error", token);
+                            error!("Connection with {:?} has error", token);
                         } else if event.is_read_closed() {
-                            error!("Connection with token {:?} is read closed", token);
+                            error!("Connection with {:?} read closed", token);
                         } else if event.is_write_closed() {
-                            error!("Connection with token {:?} is write closed", token);
+                            error!("Connection with {:?} write closed", token);
                         }
                         exec_info.connection_error();
-                        connection.deregister(self.ev_loop.registry())?;
-                        self.connections.remove(&token);
-                        self.create_connection()?;
+                        self.connection_failed(token)?;
                     } else if event.is_readable() {
                         match connection.state() {
                             ConnectionState::Receiving => {
-                                if connection.recv_response(&mut exec_info)? {
-                                    connection.state_transition(Some(self.ev_loop.registry()))?;
+                                match connection.recv_response(&mut exec_info) {
+                                    Ok(_) => {
+                                        connection
+                                            .state_transition(Some(self.ev_loop.registry()))?;
+                                    }
+                                    Err(err) => {
+                                        error!("Connection with {:?} failed: {}", token, err);
+                                        self.connection_failed(token)?;
+                                    }
                                 }
                             }
                             _ => {
@@ -375,8 +405,15 @@ impl Client {
                                 self.idle_connections.push_back(token);
                             }
                             ConnectionState::Sending => {
-                                if connection.write_request(&mut exec_info)? {
-                                    connection.state_transition(Some(self.ev_loop.registry()))?;
+                                match connection.write_request(&mut exec_info) {
+                                    Ok(_) => {
+                                        connection
+                                            .state_transition(Some(self.ev_loop.registry()))?;
+                                    }
+                                    Err(err) => {
+                                        error!("Connection with {:?} failed: {}", token, err);
+                                        self.connection_failed(token)?;
+                                    }
                                 }
                             }
                             _ => {
