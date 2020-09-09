@@ -312,9 +312,9 @@ impl Client {
             .register(&mut sfd, timer_token, Interest::READABLE)?;
 
         let now = Instant::now();
-        let mut exec_info =
-            ExecutionInfo::new(now + warmup_duration, self.read_timeout.as_micros() as u64);
-        let finish_time = now + warmup_duration + duration;
+        let start_time = now + warmup_duration;
+        let mut exec_info = ExecutionInfo::new(start_time, self.read_timeout.as_micros() as u64);
+        let finish_time = start_time + duration;
 
         let mut events = Events::with_capacity(1024);
 
@@ -339,6 +339,19 @@ impl Client {
             for event in &events {
                 let token = event.token();
                 if token == timer_token {
+                    let tfd_value = tfd.read();
+                    if tfd_value > 1 {
+                        warn!("Missing {} timer expires", tfd_value - 1);
+                    }
+                    match self.arrival_process {
+                        ArrivalProcess::Poisson => {
+                            let x: f64 = rand::thread_rng().gen_range(0.0, 1.0);
+                            let interval = -x.ln() * 1e9 / (qps as f64);
+                            let d = Duration::from_nanos(interval as u64);
+                            tfd.set_state(TimerState::Oneshot(d), SetTimeFlags::Default);
+                        }
+                        _ => {}
+                    }
                     let mut request_done = false;
                     while let Some(conn_token) = self.idle_connections.pop_front() {
                         if let Some(connection) = self.connections.get_mut(&conn_token) {
@@ -356,28 +369,20 @@ impl Client {
                             break;
                         }
                     }
-                    if !request_done {
+                    if !request_done && Instant::now() > start_time {
                         error!("Cannot find an idle connection.");
-                    }
-                    tfd.read();
-                    match self.arrival_process {
-                        ArrivalProcess::Poisson => {
-                            let x: f64 = rand::thread_rng().gen_range(0.0, 1.0);
-                            let interval = -x.ln() * 1e9 / (qps as f64);
-                            let d = Duration::from_nanos(interval as u64);
-                            tfd.set_state(TimerState::Oneshot(d), SetTimeFlags::Default);
-                        }
-                        _ => {}
                     }
                 } else if self.connections.contains_key(&token) {
                     let connection = self.connections.get_mut(&token).unwrap();
                     if event.is_error() || event.is_read_closed() || event.is_write_closed() {
-                        if event.is_error() {
-                            error!("Connection with {:?} has error", token);
-                        } else if event.is_read_closed() {
-                            error!("Connection with {:?} read closed", token);
-                        } else if event.is_write_closed() {
-                            error!("Connection with {:?} write closed", token);
+                        if Instant::now() > start_time {
+                            if event.is_error() {
+                                error!("Connection with {:?} has error", token);
+                            } else if event.is_read_closed() {
+                                error!("Connection with {:?} read closed", token);
+                            } else if event.is_write_closed() {
+                                error!("Connection with {:?} write closed", token);
+                            }
                         }
                         exec_info.connection_error();
                         self.connection_failed(token)?;
