@@ -61,6 +61,14 @@ struct Opt {
     #[structopt(long = "request-qsize", default_value = "128")]
     request_qsize: i32,
 
+    /// Path for saving trace file
+    #[structopt(short = "f", long = "trace-save-path", default_value = "")]
+    trace_save_path: String,
+
+    /// Sampling ratio for saved trace
+    #[structopt(long = "trace-sample-ratio", default_value = "1.0")]
+    trace_sample_ratio: f32,
+
     /// JavaScript file
     #[structopt(name = "SCRIPT")]
     js_script_path: String,
@@ -165,12 +173,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::new(&addr, generator);
 
     client.set_connect_timeout(humantime::parse_duration(&opt.connect_timeout)?);
-    client.set_read_timeout(humantime::parse_duration(&opt.read_timeout)?);
+    let read_timeout = humantime::parse_duration(&opt.read_timeout)?;
+    client.set_read_timeout(read_timeout);
     client.set_write_timeout(humantime::parse_duration(&opt.write_timeout)?);
     client.set_arrival_process(&opt.arrival_process);
 
-    let exec_info = client.run(opt.num_conn, opt.qps, warmup_duration, duration)?;
+    let mut exec_info = if !opt.trace_save_path.is_empty() {
+        let estimated_trace_size =
+            1.1 * opt.qps as f32 * duration.as_secs_f32() * opt.trace_sample_ratio;
+        ExecutionInfo::new(
+            read_timeout.as_micros() as u64,
+            estimated_trace_size as usize,
+            opt.trace_sample_ratio,
+        )
+    } else {
+        ExecutionInfo::new(read_timeout.as_micros() as u64, 0, 0.0)
+    };
+    client.run(
+        &mut exec_info,
+        opt.num_conn,
+        opt.qps,
+        warmup_duration,
+        duration,
+    )?;
     print_results(&opt, duration, &exec_info);
+
+    if !opt.trace_save_path.is_empty() {
+        exec_info.save_trace(&opt.trace_save_path)?;
+    }
 
     Ok(())
 }

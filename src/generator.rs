@@ -10,6 +10,11 @@ use quick_js::{self, JsValue};
 
 static JS_LIB_CODE: &'static str = include_str!("lib.js");
 
+pub struct Request {
+    pub input: Bytes,
+    pub req_type: u32,
+}
+
 #[derive(Debug)]
 pub enum Error {
     JsExecError(quick_js::ExecutionError),
@@ -31,7 +36,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 struct RequestQueue {
     capacity: usize,
-    queue: Mutex<VecDeque<Bytes>>,
+    queue: Mutex<VecDeque<Request>>,
     cond: Condvar,
     waiter: atomic::AtomicUsize,
     stopped: atomic::AtomicBool,
@@ -41,14 +46,14 @@ impl RequestQueue {
     pub fn new(capacity: usize) -> RequestQueue {
         Self {
             capacity: capacity,
-            queue: Mutex::new(VecDeque::<Bytes>::with_capacity(capacity)),
+            queue: Mutex::new(VecDeque::<Request>::with_capacity(capacity)),
             cond: Condvar::new(),
             waiter: atomic::AtomicUsize::new(0),
             stopped: atomic::AtomicBool::new(false),
         }
     }
 
-    pub fn push(&self, data: Bytes) {
+    pub fn push(&self, req: Request) {
         let mut queue = self.queue.lock().unwrap();
         while (*queue).len() >= self.capacity {
             self.waiter.fetch_add(1, atomic::Ordering::SeqCst);
@@ -59,16 +64,16 @@ impl RequestQueue {
             }
         }
         assert!((*queue).len() < self.capacity);
-        (*queue).push_back(data);
+        (*queue).push_back(req);
     }
 
-    pub fn pop(&self) -> Option<Bytes> {
+    pub fn pop(&self) -> Option<Request> {
         let mut queue = self.queue.lock().unwrap();
-        if let Some(data) = (*queue).pop_front() {
+        if let Some(req) = (*queue).pop_front() {
             if self.waiter.load(atomic::Ordering::SeqCst) > 0 {
                 self.cond.notify_one();
             }
-            return Some(data);
+            return Some(req);
         }
         None
     }
@@ -86,6 +91,17 @@ pub struct Generator {
     threads: Vec<thread::JoinHandle<()>>,
     queue: Arc<RequestQueue>,
     js_context: quick_js::Context,
+}
+
+macro_rules! expect_js_int {
+    ($value:expr, $msg:expr) => {
+        match $value {
+            JsValue::Int(num) => num.clone(),
+            _ => {
+                return Err(Error::InvalidScript($msg.to_string()));
+            }
+        }
+    };
 }
 
 macro_rules! expect_js_str {
@@ -158,8 +174,8 @@ impl Generator {
                 js_context.eval(JS_LIB_CODE).unwrap();
                 js_context.eval(&user_script).unwrap();
                 while control.load(atomic::Ordering::SeqCst) {
-                    let data = Generator::new_request(&host, &js_context).unwrap();
-                    queue.push(data);
+                    let req = Generator::new_request(&host, &js_context).unwrap();
+                    queue.push(req);
                 }
             });
             self.threads.push(thread);
@@ -167,7 +183,7 @@ impl Generator {
         Ok(())
     }
 
-    fn new_request(host: &str, js_context: &quick_js::Context) -> Result<Bytes> {
+    fn new_request(host: &str, js_context: &quick_js::Context) -> Result<Request> {
         let empty_args = iter::empty::<JsValue>();
         let request = match js_context.call_function("newRequest", empty_args) {
             Ok(value) => expect_js_obj!(value, "newRequest must return an object"),
@@ -175,14 +191,15 @@ impl Generator {
                 return Err(Error::JsExecError(js_err));
             }
         };
-        for key in ["method", "path", "headers"].iter() {
-            if !request.contains_key(*key) {
+        for &key in ["type", "method", "path", "headers"].iter() {
+            if !request.contains_key(key) {
                 return Err(Error::InvalidScript(format!(
                     "Returned object must contain `{}`",
                     key
                 )));
             }
         }
+        let req_type = expect_js_int!(request.get("type").unwrap(), "`type` must be an integer");
         let mut data = BytesMut::with_capacity(256);
         write!(
             &mut data,
@@ -236,12 +253,15 @@ impl Generator {
             write!(&mut data, "\r\n").unwrap();
         }
 
-        Ok(data.freeze())
+        Ok(Request {
+            input: data.freeze(),
+            req_type: req_type as u32,
+        })
     }
 
-    pub fn get(&mut self) -> Bytes {
-        if let Some(data) = self.queue.pop() {
-            return data;
+    pub fn get(&mut self) -> Request {
+        if let Some(req) = self.queue.pop() {
+            return req;
         }
         warn!("JS threads failed to generate enough request data");
         Generator::new_request(&self.host, &self.js_context).unwrap()

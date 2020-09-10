@@ -24,7 +24,7 @@ function randomString(base, length) {
 const flood = {
     // Random integer within [a, b)
     randInt(a, b) {
-        return (Math.random() * (b-a) | 0) + a;
+        return (Math.random() * (b - a) | 0) + a;
     },
 
     randDigitString(length) {
@@ -48,15 +48,17 @@ const flood = {
     },
 
     doGet(args) {
+        let type = ('type' in args) ? args.type : 0;
         let path = ('path' in args) ? args.path : '/';
         let headers = ('headers' in args) ? args.headers : {};
         if ('qs' in args) {
             path += '?' + encodeUriParams(args.qs);
         }
-        return { method: 'GET', path: path, headers: headers };
+        return { type: type, method: 'GET', path: path, headers: headers };
     },
 
     doPost(args) {
+        let type = ('type' in args) ? args.type : 0;
         let path = ('path' in args) ? args.path : '/';
         let headers = ('headers' in args) ? args.headers : {};
         let body = '';
@@ -70,6 +72,6 @@ const flood = {
             headers['Content-Type'] = 'application/json';
             body = JSON.stringify(args.json);
         }
-        return { method: 'POST', path: path, headers: headers, body: body };
+        return { type: type, method: 'POST', path: path, headers: headers, body: body };
     }
 };
