@@ -10,7 +10,7 @@ use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
-use env_logger;
+use env_logger::{self, Env};
 use humantime;
 use structopt::StructOpt;
 
@@ -98,60 +98,29 @@ fn print_results(opt: &Opt, duration: Duration, exec_info: &ExecutionInfo) {
     );
     print!("  {} connections\n", opt.num_conn);
     let hist = &exec_info.latency_hist;
-    if hist.total_count() > 0 {
+    if !hist.is_empty() {
         print!("  Latency Distribution (HdrHistogram)\n");
-        print!(
-            " 50.000%  {}\n",
-            format_latency(hist.percentile(0.5).unwrap())
-        );
-        print!(
-            " 75.000%  {}\n",
-            format_latency(hist.percentile(0.75).unwrap())
-        );
-        print!(
-            " 90.000%  {}\n",
-            format_latency(hist.percentile(0.90).unwrap())
-        );
-        print!(
-            " 99.000%  {}\n",
-            format_latency(hist.percentile(0.99).unwrap())
-        );
-        print!(
-            " 99.900%  {}\n",
-            format_latency(hist.percentile(0.999).unwrap())
-        );
-        print!(
-            " 99.990%  {}\n",
-            format_latency(hist.percentile(0.9999).unwrap())
-        );
-        print!(
-            " 99.999%  {}\n",
-            format_latency(hist.percentile(0.99999).unwrap())
-        );
-        print!(
-            "100.000%  {}\n",
-            format_latency(hist.percentile(1.0).unwrap())
-        );
+        for &percentile in [50.0, 75.0, 90.0, 99.0, 99.9, 99.99, 99.999, 100.0].iter() {
+            print!(
+                "{:>7.3}%  {}\n",
+                percentile,
+                format_latency(hist.value_at_percentile(percentile))
+            );
+        }
         print!("\n");
         print!("  Detailed Percentile spectrum:\n");
         print!("       Value   Percentile   TotalCount 1/(1-Percentile)\n");
         print!("\n");
-        let mut accum_count = 0;
-        let total_count = hist.total_count();
-        for bucket in hist {
-            let count = bucket.count();
-            if count == 0 {
-                continue;
+        for iter_value in hist.iter_quantiles(1) {
+            if iter_value.count_since_last_iteration() > 0 {
+                print!(
+                    "  {:>10.3}  {:>10.6}  {:>10}  {:>10.2}\n",
+                    iter_value.value_iterated_to() as f32 / 1000.0,
+                    iter_value.percentile(),
+                    iter_value.count_since_last_iteration(),
+                    1.0 / (1.0 - iter_value.quantile())
+                );
             }
-            accum_count += count;
-            let percentile = accum_count as f32 / total_count as f32;
-            print!(
-                "  {:>10.3}  {:>10.6}  {:>10}  {:>10.2}\n",
-                bucket.value() as f32 / 1000.0,
-                percentile,
-                accum_count,
-                1.0 / (1.0 - percentile)
-            );
         }
         print!("----------------------------------------------------------\n");
     }
@@ -177,7 +146,7 @@ fn print_results(opt: &Opt, duration: Duration, exec_info: &ExecutionInfo) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    env_logger::from_env(Env::default().default_filter_or("info")).init();
     let opt = Opt::from_args();
 
     let mut resolved_addrs = opt.host.to_socket_addrs()?;

@@ -1,11 +1,11 @@
 use std::time::Instant;
 
-use rustcommon_atomics::AtomicU32;
-use rustcommon_datastructures::Histogram;
+use hdrhistogram::Histogram;
+use log::*;
 
 pub struct ExecutionInfo {
     initial_time: Instant,
-    pub latency_hist: Histogram<AtomicU32>,
+    pub latency_hist: Histogram<u32>,
     pub bytes_sent: usize,
     pub bytes_recv: usize,
     pub request_total: u32,
@@ -19,7 +19,7 @@ impl ExecutionInfo {
     pub fn new(initial_time: Instant, hist_max: u64) -> ExecutionInfo {
         Self {
             initial_time: initial_time,
-            latency_hist: Histogram::<AtomicU32>::new(hist_max, 3, None, None),
+            latency_hist: Histogram::<u32>::new_with_max(hist_max, 3).unwrap(),
             bytes_sent: 0,
             bytes_recv: 0,
             request_total: 0,
@@ -50,7 +50,9 @@ impl ExecutionInfo {
         }
         self.success_count += 1;
         let latency: u64 = finish_time.duration_since(start_time).as_micros() as u64;
-        self.latency_hist.increment(latency, 1);
+        if !self.latency_hist.record(latency).is_ok() {
+            warn!("Failed to record latency: {}", latency);
+        }
     }
 
     pub fn request_failed(&mut self, start_time: Instant, finish_time: Instant) {
@@ -59,7 +61,9 @@ impl ExecutionInfo {
         }
         self.failure_count += 1;
         let latency: u64 = finish_time.duration_since(start_time).as_micros() as u64;
-        self.latency_hist.increment(latency, 1);
+        if !self.latency_hist.record(latency).is_ok() {
+            warn!("Failed to record latency: {}", latency);
+        }
     }
 
     pub fn connection_error(&mut self) {
