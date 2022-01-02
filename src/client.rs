@@ -345,7 +345,7 @@ impl Client {
                     }
                     match self.arrival_process {
                         ArrivalProcess::Poisson => {
-                            let x: f64 = rand::thread_rng().gen_range(0.0, 1.0);
+                            let x: f64 = rand::thread_rng().gen_range(0.0..1.0);
                             let interval = -x.ln() * 1e9 / (qps as f64);
                             let d = Duration::from_nanos(interval as u64);
                             tfd.set_state(TimerState::Oneshot(d), SetTimeFlags::Default);

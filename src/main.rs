@@ -154,7 +154,7 @@ fn print_results(opt: &Opt, duration: Duration, exec_info: &ExecutionInfo) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let opt = Opt::from_args();
 
     let mut resolved_addrs = opt.host.to_socket_addrs()?;

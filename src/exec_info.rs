@@ -64,7 +64,7 @@ impl ExecutionInfo {
         if self.trace_sample_ratio > 0.0 {
             let start_timestamp = start_time.duration_since(self.initial_time).as_micros() as u32;
             let finish_timestamp = finish_time.duration_since(self.initial_time).as_micros() as u32;
-            if rand::thread_rng().gen_range(0.0, 1.0) < self.trace_sample_ratio {
+            if rand::thread_rng().gen_range(0.0..1.0) < self.trace_sample_ratio {
                 self.traces
                     .push((req_type, start_timestamp, finish_timestamp));
             }
